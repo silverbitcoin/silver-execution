@@ -25,6 +25,13 @@ pub type FuelResult<T> = std::result::Result<T, FuelError>;
 /// Minimum fuel price in MIST per fuel unit (Requirement 9.5)
 pub const MIN_FUEL_PRICE: u64 = 1000;
 
+/// Number of MIST per SBTC (1 SBTC = 1,000,000,000 MIST)
+pub const MIST_PER_SBTC: u64 = 1_000_000_000;
+
+/// Target maximum fee for simple transfers (0.001 SBTC = 1,000,000 MIST)
+/// This is the target maximum fee to meet Requirement 31.1
+pub const TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST: u64 = 1_000_000;
+
 /// Fuel payment information
 ///
 /// Tracks fuel payment, deduction, and refund for a transaction.
@@ -351,6 +358,79 @@ pub struct FuelSchedule {
 
 impl Default for FuelSchedule {
     fn default() -> Self {
+        Self::optimized()
+    }
+}
+
+impl FuelSchedule {
+    /// Create an optimized fuel schedule for low transaction fees
+    ///
+    /// This schedule is designed to meet Requirement 31.1:
+    /// Average transaction fees below 0.001 SBTC for simple transfers.
+    ///
+    /// Calculation for simple transfer at minimum fuel price (1000 MIST/fuel):
+    /// - Base transaction: 200 fuel = 200,000 MIST
+    /// - Signature verification (Dilithium3): 300 fuel = 300,000 MIST
+    /// - Transfer command: 50 fuel = 50,000 MIST
+    /// - Transaction size (500 bytes): 0 fuel = 0 MIST (included in base)
+    /// - Storage write (200 bytes): 400 fuel = 400,000 MIST
+    /// **Total: ~950 fuel = 950,000 MIST = 0.00095 SBTC** ✓
+    ///
+    /// This is well below the 0.001 SBTC (1,000,000 MIST) target.
+    pub fn optimized() -> Self {
+        Self {
+            // Base costs - OPTIMIZED for low fees
+            base_transaction: 200,  // Reduced from 1000 to 200
+            per_byte: 0,            // Reduced from 1 to 0 (size included in base)
+
+            // Command costs - OPTIMIZED for common operations
+            transfer: 50,           // Reduced from 100 to 50
+            split: 80,              // Reduced from 200 to 80
+            merge: 60,              // Reduced from 150 to 60
+            publish_per_byte: 5,    // Reduced from 10 to 5
+            call_base: 200,         // Reduced from 500 to 200
+            call_per_arg: 20,       // Reduced from 50 to 20
+            vector_per_element: 5,  // Reduced from 10 to 5
+            delete: 40,             // Reduced from 100 to 40
+            share: 80,              // Reduced from 200 to 80
+            freeze: 80,             // Reduced from 200 to 80
+
+            // VM costs - OPTIMIZED for efficient execution
+            instruction: 1,
+            memory_per_byte: 0,     // Reduced from 1 to 0 (minimal cost)
+            storage_read_per_byte: 1,   // Reduced from 10 to 1 (RocksDB is fast)
+            storage_write_per_byte: 2,  // Reduced from 100 to 2 (with compression)
+
+            // Cryptographic costs - OPTIMIZED with GPU acceleration in mind
+            signature_verify: 400,           // Reduced from 1000 to 400 (GPU accelerated)
+            signature_verify_sphincs: 1200,  // Reduced from 3000 to 1200 (GPU accelerated)
+            signature_verify_dilithium: 300, // Reduced from 1500 to 300 (GPU accelerated, preferred)
+            hash_per_byte: 0,                // Reduced from 1 to 0 (Blake3 is extremely fast)
+            blake3_per_byte: 0,              // Blake3 is extremely fast, minimal cost
+            pubkey_derive: 100,              // Reduced from 500 to 100
+            address_derive: 50,              // Reduced from 200 to 50
+
+            // Bytecode instruction costs - OPTIMIZED for VM efficiency
+            arithmetic_op: 1,
+            comparison_op: 1,
+            logical_op: 1,
+            bitwise_op: 1,
+            stack_op: 1,
+            local_access: 1,        // Reduced from 2 to 1
+            global_access: 3,       // Reduced from 5 to 3
+            function_call: 5,       // Reduced from 10 to 5
+            function_return: 2,     // Reduced from 5 to 2
+            branch_op: 1,           // Reduced from 2 to 1
+            field_access: 2,        // Reduced from 3 to 2
+            vector_op_per_element: 1, // Reduced from 2 to 1
+        }
+    }
+
+    /// Create a legacy fuel schedule (pre-optimization)
+    ///
+    /// This schedule represents the original costs before optimization.
+    /// Kept for compatibility and testing purposes.
+    pub fn legacy() -> Self {
         Self {
             // Base costs
             base_transaction: 1000,
@@ -594,6 +674,67 @@ impl FuelSchedule {
     pub fn vector_op_cost(&self, num_elements: u64) -> u64 {
         self.vector_op_per_element * num_elements
     }
+
+    /// Calculate the fuel cost for a simple transfer transaction
+    ///
+    /// A simple transfer includes:
+    /// - Base transaction cost
+    /// - Signature verification (Dilithium3 preferred for speed)
+    /// - Transfer command
+    /// - Transaction size overhead (typical ~500 bytes)
+    /// - Storage write for balance update (~200 bytes)
+    ///
+    /// # Returns
+    /// Total fuel units required for a simple transfer
+    pub fn simple_transfer_fuel_cost(&self) -> u64 {
+        let base = self.base_transaction;
+        let signature = self.signature_verify_dilithium; // Use Dilithium3 (fastest PQ signature)
+        let transfer = self.transfer;
+        let tx_size = 500; // Typical transaction size in bytes
+        let size_cost = self.per_byte * tx_size;
+        let storage = self.storage_write_per_byte * 200; // ~200 bytes for balance update
+
+        base + signature + transfer + size_cost + storage
+    }
+
+    /// Calculate the MIST cost for a simple transfer at minimum fuel price
+    ///
+    /// # Returns
+    /// Total cost in MIST for a simple transfer at minimum fuel price
+    pub fn simple_transfer_mist_cost(&self) -> u64 {
+        self.simple_transfer_fuel_cost() * MIN_FUEL_PRICE
+    }
+
+    /// Calculate the SBTC cost for a simple transfer at minimum fuel price
+    ///
+    /// # Returns
+    /// Total cost in SBTC (as f64) for a simple transfer at minimum fuel price
+    pub fn simple_transfer_sbtc_cost(&self) -> f64 {
+        self.simple_transfer_mist_cost() as f64 / MIST_PER_SBTC as f64
+    }
+
+    /// Verify that simple transfer costs meet the accessibility requirement
+    ///
+    /// Requirement 31.1: Average transaction fees below 0.001 SBTC
+    ///
+    /// # Returns
+    /// `true` if the simple transfer cost is below 0.001 SBTC, `false` otherwise
+    pub fn meets_accessibility_requirement(&self) -> bool {
+        self.simple_transfer_mist_cost() < TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST
+    }
+
+    /// Get a detailed breakdown of simple transfer costs
+    ///
+    /// # Returns
+    /// A tuple of (fuel_units, mist_cost, sbtc_cost, meets_requirement)
+    pub fn simple_transfer_cost_breakdown(&self) -> (u64, u64, f64, bool) {
+        let fuel = self.simple_transfer_fuel_cost();
+        let mist = self.simple_transfer_mist_cost();
+        let sbtc = self.simple_transfer_sbtc_cost();
+        let meets_req = self.meets_accessibility_requirement();
+
+        (fuel, mist, sbtc, meets_req)
+    }
 }
 
 #[cfg(test)]
@@ -658,21 +799,22 @@ mod tests {
     fn test_fuel_schedule_defaults() {
         let schedule = FuelSchedule::default();
 
-        assert_eq!(schedule.base_transaction, 1000);
-        assert_eq!(schedule.transfer, 100);
+        // Default is now optimized
+        assert_eq!(schedule.base_transaction, 200);
+        assert_eq!(schedule.transfer, 50);
         assert_eq!(schedule.instruction, 1);
-        assert_eq!(schedule.signature_verify, 1000);
-        assert_eq!(schedule.signature_verify_sphincs, 3000);
-        assert_eq!(schedule.signature_verify_dilithium, 1500);
+        assert_eq!(schedule.signature_verify, 400);
+        assert_eq!(schedule.signature_verify_sphincs, 1200);
+        assert_eq!(schedule.signature_verify_dilithium, 300);
     }
 
     #[test]
     fn test_fuel_schedule_costs() {
         let schedule = FuelSchedule::default();
 
-        // Test transaction cost calculation
+        // Test transaction cost calculation (per_byte is now 0)
         let tx_cost = schedule.transaction_cost(1000);
-        assert_eq!(tx_cost, schedule.base_transaction + 1000);
+        assert_eq!(tx_cost, schedule.base_transaction); // No per-byte cost
 
         // Test publish cost
         let publish_cost = schedule.publish_cost(5000);
@@ -710,18 +852,18 @@ mod tests {
     fn test_cryptographic_operation_costs() {
         let schedule = FuelSchedule::default();
 
-        // Test signature verification costs
-        assert_eq!(schedule.signature_verify_cost(), 1000);
-        assert_eq!(schedule.signature_verify_sphincs_cost(), 3000);
-        assert_eq!(schedule.signature_verify_dilithium_cost(), 1500);
+        // Test signature verification costs (optimized with GPU)
+        assert_eq!(schedule.signature_verify_cost(), 400);
+        assert_eq!(schedule.signature_verify_sphincs_cost(), 1200);
+        assert_eq!(schedule.signature_verify_dilithium_cost(), 300);
 
-        // Test hash costs
-        assert_eq!(schedule.blake3_cost(1000), 1000);
-        assert_eq!(schedule.hash_cost(500), 500);
+        // Test hash costs (Blake3 is nearly free)
+        assert_eq!(schedule.blake3_cost(1000), 0);
+        assert_eq!(schedule.hash_cost(500), 0);
 
-        // Test key derivation costs
-        assert_eq!(schedule.pubkey_derive_cost(), 500);
-        assert_eq!(schedule.address_derive_cost(), 200);
+        // Test key derivation costs (optimized)
+        assert_eq!(schedule.pubkey_derive_cost(), 100);
+        assert_eq!(schedule.address_derive_cost(), 50);
     }
 
     #[test]
@@ -735,28 +877,28 @@ mod tests {
         assert_eq!(schedule.bitwise_cost(), 1);
         assert_eq!(schedule.stack_cost(), 1);
 
-        // Test memory access costs
-        assert_eq!(schedule.local_access_cost(), 2);
-        assert_eq!(schedule.global_access_cost(), 5);
+        // Test memory access costs (optimized)
+        assert_eq!(schedule.local_access_cost(), 1);
+        assert_eq!(schedule.global_access_cost(), 3);
 
-        // Test control flow costs
-        assert_eq!(schedule.function_call_cost(), 10);
-        assert_eq!(schedule.function_return_cost(), 5);
-        assert_eq!(schedule.branch_cost(), 2);
+        // Test control flow costs (optimized)
+        assert_eq!(schedule.function_call_cost(), 5);
+        assert_eq!(schedule.function_return_cost(), 2);
+        assert_eq!(schedule.branch_cost(), 1);
 
-        // Test object access costs
-        assert_eq!(schedule.field_access_cost(), 3);
-        assert_eq!(schedule.vector_op_cost(10), 20);
+        // Test object access costs (optimized)
+        assert_eq!(schedule.field_access_cost(), 2);
+        assert_eq!(schedule.vector_op_cost(10), 10);
     }
 
     #[test]
     fn test_storage_operation_costs() {
         let schedule = FuelSchedule::default();
 
-        // Test storage costs
-        assert_eq!(schedule.storage_read_cost(1000), 10_000);
-        assert_eq!(schedule.storage_write_cost(1000), 100_000);
-        assert_eq!(schedule.memory_cost(1000), 1000);
+        // Test storage costs (optimized)
+        assert_eq!(schedule.storage_read_cost(1000), 1000);
+        assert_eq!(schedule.storage_write_cost(1000), 2000);
+        assert_eq!(schedule.memory_cost(1000), 0);
     }
 
     #[test]
@@ -844,6 +986,258 @@ mod tests {
     #[test]
     fn test_minimum_fuel_price_constant() {
         assert_eq!(MIN_FUEL_PRICE, 1000);
+    }
+
+    #[test]
+    fn test_mist_per_sbtc_constant() {
+        assert_eq!(MIST_PER_SBTC, 1_000_000_000);
+    }
+
+    #[test]
+    fn test_target_max_simple_transfer_fee() {
+        assert_eq!(TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST, 1_000_000);
+        // Verify it equals 0.001 SBTC
+        assert_eq!(TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST, MIST_PER_SBTC / 1000);
+    }
+
+    #[test]
+    fn test_optimized_schedule_simple_transfer_cost() {
+        let schedule = FuelSchedule::optimized();
+
+        // Calculate simple transfer cost
+        let fuel_cost = schedule.simple_transfer_fuel_cost();
+        let mist_cost = schedule.simple_transfer_mist_cost();
+        let sbtc_cost = schedule.simple_transfer_sbtc_cost();
+
+        println!("Simple transfer cost:");
+        println!("  Fuel units: {}", fuel_cost);
+        println!("  MIST: {}", mist_cost);
+        println!("  SBTC: {:.6}", sbtc_cost);
+
+        // Verify it meets the requirement (< 0.001 SBTC)
+        assert!(
+            mist_cost < TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST,
+            "Simple transfer cost {} MIST exceeds target {} MIST",
+            mist_cost,
+            TARGET_MAX_SIMPLE_TRANSFER_FEE_MIST
+        );
+
+        assert!(
+            sbtc_cost < 0.001,
+            "Simple transfer cost {:.6} SBTC exceeds target 0.001 SBTC",
+            sbtc_cost
+        );
+    }
+
+    #[test]
+    fn test_optimized_schedule_meets_accessibility_requirement() {
+        let schedule = FuelSchedule::optimized();
+
+        assert!(
+            schedule.meets_accessibility_requirement(),
+            "Optimized schedule does not meet accessibility requirement (Requirement 31.1)"
+        );
+    }
+
+    #[test]
+    fn test_simple_transfer_cost_breakdown() {
+        let schedule = FuelSchedule::optimized();
+
+        let (fuel, mist, sbtc, meets_req) = schedule.simple_transfer_cost_breakdown();
+
+        println!("Simple transfer breakdown:");
+        println!("  Fuel: {} units", fuel);
+        println!("  MIST: {}", mist);
+        println!("  SBTC: {:.6}", sbtc);
+        println!("  Meets requirement: {}", meets_req);
+
+        assert!(meets_req, "Simple transfer does not meet accessibility requirement");
+        assert!(fuel > 0, "Fuel cost should be positive");
+        assert!(mist > 0, "MIST cost should be positive");
+        assert!(sbtc > 0.0, "SBTC cost should be positive");
+    }
+
+    #[test]
+    fn test_optimized_vs_legacy_schedule() {
+        let optimized = FuelSchedule::optimized();
+        let legacy = FuelSchedule::legacy();
+
+        // Optimized should have lower costs
+        assert!(
+            optimized.base_transaction < legacy.base_transaction,
+            "Optimized base transaction cost should be lower"
+        );
+        assert!(
+            optimized.transfer < legacy.transfer,
+            "Optimized transfer cost should be lower"
+        );
+        assert!(
+            optimized.signature_verify_dilithium < legacy.signature_verify_dilithium,
+            "Optimized signature verification cost should be lower"
+        );
+
+        // Verify optimized meets requirement but legacy might not
+        assert!(
+            optimized.meets_accessibility_requirement(),
+            "Optimized schedule should meet accessibility requirement"
+        );
+
+        println!("Optimized simple transfer: {:.6} SBTC", optimized.simple_transfer_sbtc_cost());
+        println!("Legacy simple transfer: {:.6} SBTC", legacy.simple_transfer_sbtc_cost());
+    }
+
+    #[test]
+    fn test_detailed_simple_transfer_breakdown() {
+        let schedule = FuelSchedule::optimized();
+
+        // Break down each component
+        let base = schedule.base_transaction;
+        let signature = schedule.signature_verify_dilithium;
+        let transfer = schedule.transfer;
+        let size_cost = schedule.per_byte * 500;
+        let storage = schedule.storage_write_per_byte * 200;
+
+        let total_fuel = base + signature + transfer + size_cost + storage;
+        let total_mist = total_fuel * MIN_FUEL_PRICE;
+        let total_sbtc = total_mist as f64 / MIST_PER_SBTC as f64;
+
+        println!("Detailed breakdown:");
+        println!("  Base transaction: {} fuel = {} MIST", base, base * MIN_FUEL_PRICE);
+        println!("  Signature (Dilithium3): {} fuel = {} MIST", signature, signature * MIN_FUEL_PRICE);
+        println!("  Transfer command: {} fuel = {} MIST", transfer, transfer * MIN_FUEL_PRICE);
+        println!("  Size overhead (500 bytes): {} fuel = {} MIST", size_cost, size_cost * MIN_FUEL_PRICE);
+        println!("  Storage write (200 bytes): {} fuel = {} MIST", storage, storage * MIN_FUEL_PRICE);
+        println!("  ---");
+        println!("  Total: {} fuel = {} MIST = {:.6} SBTC", total_fuel, total_mist, total_sbtc);
+
+        assert_eq!(total_fuel, schedule.simple_transfer_fuel_cost());
+        assert_eq!(total_mist, schedule.simple_transfer_mist_cost());
+        assert!((total_sbtc - schedule.simple_transfer_sbtc_cost()).abs() < 0.000001);
+    }
+
+    #[test]
+    fn test_common_operations_are_affordable() {
+        let schedule = FuelSchedule::optimized();
+
+        // Test various common operations at minimum fuel price
+        let operations = vec![
+            ("Simple transfer", schedule.simple_transfer_fuel_cost()),
+            ("Split coins", schedule.base_transaction + schedule.split + schedule.signature_verify_dilithium),
+            ("Merge coins", schedule.base_transaction + schedule.merge + schedule.signature_verify_dilithium),
+            ("Delete object", schedule.base_transaction + schedule.delete + schedule.signature_verify_dilithium),
+        ];
+
+        println!("Common operation costs:");
+        for (name, fuel) in operations {
+            let mist = fuel * MIN_FUEL_PRICE;
+            let sbtc = mist as f64 / MIST_PER_SBTC as f64;
+            println!("  {}: {} fuel = {} MIST = {:.6} SBTC", name, fuel, mist, sbtc);
+
+            // All common operations should be well below 0.01 SBTC
+            assert!(
+                sbtc < 0.01,
+                "{} cost {:.6} SBTC exceeds 0.01 SBTC threshold",
+                name,
+                sbtc
+            );
+        }
+    }
+
+    #[test]
+    fn test_gpu_accelerated_signature_costs() {
+        let schedule = FuelSchedule::optimized();
+
+        // GPU acceleration should make signature verification cheaper
+        assert!(
+            schedule.signature_verify_dilithium < 500,
+            "Dilithium3 verification should be < 500 fuel with GPU acceleration"
+        );
+        assert!(
+            schedule.signature_verify_sphincs < 1500,
+            "SPHINCS+ verification should be < 1500 fuel with GPU acceleration"
+        );
+        assert!(
+            schedule.signature_verify < 500,
+            "Classical signature verification should be < 500 fuel with GPU acceleration"
+        );
+    }
+
+    #[test]
+    fn test_storage_costs_are_reasonable() {
+        let schedule = FuelSchedule::optimized();
+
+        // Storage costs should be reasonable for typical operations
+        let read_1kb = schedule.storage_read_cost(1024);
+        let write_1kb = schedule.storage_write_cost(1024);
+
+        let read_mist = read_1kb * MIN_FUEL_PRICE;
+        let write_mist = write_1kb * MIN_FUEL_PRICE;
+
+        println!("Storage costs (1KB):");
+        println!("  Read: {} fuel = {} MIST", read_1kb, read_mist);
+        println!("  Write: {} fuel = {} MIST", write_1kb, write_mist);
+
+        // 1KB storage operations should be affordable (optimized costs)
+        assert!(
+            read_mist < 2_000_000,
+            "1KB read cost {} MIST is too high",
+            read_mist
+        );
+        assert!(
+            write_mist < 3_000_000,
+            "1KB write cost {} MIST is too high",
+            write_mist
+        );
+    }
+
+    #[test]
+    fn test_vm_instruction_costs_are_minimal() {
+        let schedule = FuelSchedule::optimized();
+
+        // VM instructions should have minimal cost
+        assert_eq!(schedule.arithmetic_cost(), 1);
+        assert_eq!(schedule.comparison_cost(), 1);
+        assert_eq!(schedule.logical_cost(), 1);
+        assert_eq!(schedule.stack_cost(), 1);
+
+        // Even complex operations should be cheap
+        assert!(schedule.function_call_cost() <= 5);
+        assert!(schedule.global_access_cost() <= 3);
+    }
+
+    #[test]
+    fn test_hash_operations_are_nearly_free() {
+        let schedule = FuelSchedule::optimized();
+
+        // Blake3 is extremely fast, should have minimal cost
+        let hash_1kb = schedule.blake3_cost(1024);
+        assert_eq!(hash_1kb, 0, "Blake3 hashing should be nearly free");
+
+        let hash_cost = schedule.hash_cost(1024);
+        assert_eq!(hash_cost, 0, "Generic hashing should be nearly free");
+    }
+
+    #[test]
+    fn test_fuel_schedule_consistency() {
+        let schedule = FuelSchedule::optimized();
+
+        // Verify internal consistency
+        assert!(
+            schedule.split >= schedule.transfer,
+            "Split should cost at least as much as transfer"
+        );
+        assert!(
+            schedule.merge >= schedule.transfer,
+            "Merge should cost at least as much as transfer"
+        );
+        assert!(
+            schedule.storage_write_per_byte >= schedule.storage_read_per_byte,
+            "Write should cost at least as much as read"
+        );
+        assert!(
+            schedule.signature_verify_sphincs >= schedule.signature_verify_dilithium,
+            "SPHINCS+ should cost at least as much as Dilithium3"
+        );
     }
 }
 
