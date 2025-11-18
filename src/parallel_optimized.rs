@@ -31,6 +31,7 @@ pub struct WorkStealingExecutor {
     injector: Arc<Injector<WorkItem>>,
     
     /// Worker stealers (for work stealing)
+    #[allow(dead_code)]
     stealers: Arc<Vec<Stealer<WorkItem>>>,
     
     /// NUMA node affinity (if available)

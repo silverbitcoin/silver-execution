@@ -125,6 +125,7 @@ struct ExecutionContext {
 
 /// Result from executing a command
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 enum CommandResult {
     /// Object reference result
     Object(ObjectRef),
@@ -211,6 +212,7 @@ impl ExecutionContext {
     }
 
     /// Get a command result by index
+    #[allow(dead_code)]
     fn get_result(&self, index: u16) -> Result<&CommandResult> {
         self.command_results
             .get(index as usize)
@@ -256,6 +258,7 @@ pub struct TransactionExecutor {
     object_store: Arc<ObjectStore>,
 
     /// Quantum VM for executing smart contract code
+    #[allow(dead_code)]
     vm: Arc<QuantumVM>,
 
     /// Fuel schedule for pricing operations
@@ -918,6 +921,7 @@ impl DependencyGraph {
     }
 
     /// Check if a transaction has dependencies
+    #[allow(dead_code)]
     fn has_dependencies(&self, index: usize) -> bool {
         self.dependencies
             .get(&index)
@@ -926,6 +930,7 @@ impl DependencyGraph {
     }
 
     /// Get dependencies for a transaction
+    #[allow(dead_code)]
     fn get_dependencies(&self, index: usize) -> Vec<usize> {
         self.dependencies
             .get(&index)
