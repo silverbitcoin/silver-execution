@@ -1183,7 +1183,7 @@ impl ParallelExecutionStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use silver_core::{object::ObjectType, TransactionData, TransactionExpiration};
+    use silver_core::{TransactionData, TransactionExpiration};
     use silver_storage::RocksDatabase;
     use tempfile::TempDir;
 

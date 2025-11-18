@@ -6,12 +6,11 @@
 //! - Optimized hot paths for bytecode interpretation
 //! - Lock-free data structures for reduced contention
 
-use crate::executor::{TransactionExecutor, ParallelExecutionStats};
+use crate::executor::TransactionExecutor;
 use crate::effects::ExecutionResult;
 use silver_core::Transaction;
 use std::sync::Arc;
 use crossbeam::deque::{Injector, Stealer, Worker};
-use crossbeam::channel;
 use parking_lot::Mutex;
 use std::thread;
 use tracing::{debug, info};
@@ -267,7 +266,7 @@ impl WorkStealingExecutor {
 ///
 /// This module contains optimizations for frequently executed bytecode operations.
 pub mod hot_path {
-    use tracing::trace;
+    
     
     /// OPTIMIZATION: Fast path for integer arithmetic
     ///

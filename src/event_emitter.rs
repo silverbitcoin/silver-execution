@@ -334,7 +334,7 @@ impl EventStats {
 mod tests {
     use super::*;
     use crate::effects::Event;
-    use silver_core::{ObjectID, SilverAddress, TransactionDigest};
+    use silver_core::{SilverAddress, TransactionDigest};
     use silver_storage::RocksDatabase;
     use tempfile::TempDir;
 

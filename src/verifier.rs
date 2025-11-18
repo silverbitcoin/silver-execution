@@ -672,8 +672,7 @@ impl BytecodeVerifier {
 mod tests {
     use super::*;
     use silver_core::{
-        object::{ObjectType, Owner},
-        Command, ObjectID, ObjectRef, SequenceNumber, TransactionData, TransactionExpiration,
+        ObjectID, ObjectRef, SequenceNumber, TransactionData, TransactionExpiration,
         TransactionKind, TransactionDigest,
     };
     use silver_storage::RocksDatabase;
