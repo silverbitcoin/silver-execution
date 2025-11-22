@@ -236,10 +236,36 @@ impl TransactionEffects {
     /// Verify the effects signature
     ///
     /// Returns true if the signature is valid, false otherwise.
-    pub fn verify_signature(&self, _public_key: &[u8]) -> bool {
-        // TODO: Implement actual signature verification
-        // For now, just check if signature exists
-        self.signature.is_some()
+    pub fn verify_signature(&self, public_key: &[u8]) -> bool {
+        // Verify the effects signature using the provided public key
+        if let Some(sig) = &self.signature {
+            // Compute the effects digest
+            let digest = self.compute_effects_digest();
+
+            // Verify signature using Dilithium3 (default scheme for effects)
+            use silver_crypto::SignatureVerifier;
+            let verifier = silver_crypto::Dilithium3;
+
+            let public_key_obj = silver_core::PublicKey {
+                scheme: silver_core::SignatureScheme::Dilithium3,
+                bytes: public_key.to_vec(),
+            };
+
+            let signature_obj = silver_core::Signature {
+                scheme: silver_core::SignatureScheme::Dilithium3,
+                bytes: sig.clone(),
+            };
+
+            match verifier.verify(&digest, &signature_obj, &public_key_obj) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!("Effects signature verification failed: {}", e);
+                    false
+                }
+            }
+        } else {
+            false
+        }
     }
 
     /// Compute a digest of the effects for signing

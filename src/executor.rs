@@ -642,47 +642,234 @@ impl TransactionExecutor {
     fn execute_make_move_vec(
         &self,
         ctx: &mut ExecutionContext,
-        _element_type: &Option<TypeTag>,
+        element_type: &Option<TypeTag>,
         elements: &[CallArg],
     ) -> Result<()> {
-        debug!("Creating Move vector with {} elements", elements.len());
+        debug!(
+            "Creating Move vector with {} elements (type: {:?})",
+            elements.len(),
+            element_type
+        );
 
         // Charge fuel for vector creation
         ctx.charge_fuel(self.fuel_schedule.vector_cost(elements.len() as u64))?;
 
-        // Create Move vector value
-        // This creates a serialized vector structure that can be used by subsequent commands.
-        // Full Move type system integration requires Quantum VM (Task 8).
-        // For now, we create a simple serialized representation.
+        // Type-aware serialization based on element type
+        let vector_data = if let Some(type_tag) = element_type {
+            self.serialize_typed_vector(ctx, type_tag, elements)?
+        } else {
+            // Untyped vector - serialize as generic values
+            self.serialize_untyped_vector(ctx, elements)?
+        };
+
+        ctx.add_result(CommandResult::Value(vector_data));
+        Ok(())
+    }
+
+    /// Serialize a typed vector with type-aware encoding
+    fn serialize_typed_vector(
+        &self,
+        ctx: &mut ExecutionContext,
+        element_type: &TypeTag,
+        elements: &[CallArg],
+    ) -> Result<Vec<u8>> {
         let mut vector_data = Vec::new();
-        
+
+        // Write vector header: type tag + element count
+        let type_bytes = bcs::to_bytes(element_type)
+            .map_err(|e| ExecutionError::CommandFailed(format!("Failed to serialize type: {}", e)))?;
+        vector_data.extend_from_slice(&(type_bytes.len() as u32).to_le_bytes());
+        vector_data.extend_from_slice(&type_bytes);
+        vector_data.extend_from_slice(&(elements.len() as u64).to_le_bytes());
+
+        // Serialize each element according to its type
+        for element in elements {
+            let element_bytes = self.serialize_call_arg(ctx, element_type, element)?;
+            vector_data.extend_from_slice(&(element_bytes.len() as u32).to_le_bytes());
+            vector_data.extend_from_slice(&element_bytes);
+        }
+
+        debug!("Typed vector serialized: {} bytes", vector_data.len());
+        Ok(vector_data)
+    }
+
+    /// Serialize an untyped vector
+    fn serialize_untyped_vector(
+        &self,
+        ctx: &mut ExecutionContext,
+        elements: &[CallArg],
+    ) -> Result<Vec<u8>> {
+        let mut vector_data = Vec::new();
+
         // Write element count
         vector_data.extend_from_slice(&(elements.len() as u64).to_le_bytes());
-        
-        // Serialize each element (simplified - full implementation needs type-aware serialization)
+
+        // Serialize each element
         for element in elements {
-            match element {
-                CallArg::Pure(bytes) => {
-                    vector_data.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-                    vector_data.extend_from_slice(bytes);
+            let element_bytes = self.serialize_call_arg_untyped(ctx, element)?;
+            vector_data.extend_from_slice(&(element_bytes.len() as u32).to_le_bytes());
+            vector_data.extend_from_slice(&element_bytes);
+        }
+
+        debug!("Untyped vector serialized: {} bytes", vector_data.len());
+        Ok(vector_data)
+    }
+
+    /// Serialize a call argument according to its type
+    fn serialize_call_arg(
+        &self,
+        ctx: &mut ExecutionContext,
+        element_type: &TypeTag,
+        arg: &CallArg,
+    ) -> Result<Vec<u8>> {
+        match arg {
+            CallArg::Pure(bytes) => {
+                // Validate pure value matches type
+                self.validate_pure_value(element_type, bytes)?;
+                Ok(bytes.clone())
+            }
+            CallArg::Object(obj_ref) => {
+                // Serialize object reference with type validation
+                let obj = ctx.get_object(&self.object_store, &obj_ref.id)?;
+                self.validate_object_type(element_type, &obj)?;
+                
+                let mut ref_bytes = Vec::new();
+                ref_bytes.extend_from_slice(obj_ref.id.as_bytes());
+                ref_bytes.extend_from_slice(&obj_ref.version.value().to_le_bytes());
+                Ok(ref_bytes)
+            }
+            CallArg::Result(index) => {
+                // Get result value and validate type
+                let result_value = ctx.get_result(*index)?;
+                self.validate_result_type(element_type, result_value)?;
+                
+                let mut result_bytes = Vec::new();
+                result_bytes.extend_from_slice(&(*index as u64).to_le_bytes());
+                Ok(result_bytes)
+            }
+            CallArg::NestedResult(outer, inner) => {
+                // Get nested result and validate type
+                let result_value = ctx.get_nested_result(*outer, *inner)?;
+                self.validate_result_type(element_type, result_value)?;
+                
+                let mut result_bytes = Vec::new();
+                result_bytes.extend_from_slice(&(*outer as u64).to_le_bytes());
+                result_bytes.extend_from_slice(&(*inner as u64).to_le_bytes());
+                Ok(result_bytes)
+            }
+        }
+    }
+
+    /// Serialize a call argument without type information
+    fn serialize_call_arg_untyped(
+        &self,
+        ctx: &mut ExecutionContext,
+        arg: &CallArg,
+    ) -> Result<Vec<u8>> {
+        match arg {
+            CallArg::Pure(bytes) => Ok(bytes.clone()),
+            CallArg::Object(obj_ref) => {
+                let mut ref_bytes = Vec::new();
+                ref_bytes.extend_from_slice(obj_ref.id.as_bytes());
+                ref_bytes.extend_from_slice(&obj_ref.version.value().to_le_bytes());
+                Ok(ref_bytes)
+            }
+            CallArg::Result(index) => {
+                let mut result_bytes = Vec::new();
+                result_bytes.extend_from_slice(&(*index as u64).to_le_bytes());
+                Ok(result_bytes)
+            }
+            CallArg::NestedResult(outer, inner) => {
+                let mut result_bytes = Vec::new();
+                result_bytes.extend_from_slice(&(*outer as u64).to_le_bytes());
+                result_bytes.extend_from_slice(&(*inner as u64).to_le_bytes());
+                Ok(result_bytes)
+            }
+        }
+    }
+
+    /// Validate that a pure value matches the expected type
+    fn validate_pure_value(&self, type_tag: &TypeTag, value: &[u8]) -> Result<()> {
+        match type_tag {
+            TypeTag::Bool => {
+                if value.len() != 1 {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: "bool (1 byte)".to_string(),
+                        actual: format!("{} bytes", value.len()),
+                    });
                 }
-                CallArg::Object(obj_ref) => {
-                    // Store object reference
-                    vector_data.extend_from_slice(obj_ref.id.as_bytes());
+            }
+            TypeTag::U8 => {
+                if value.len() != 1 {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: "u8 (1 byte)".to_string(),
+                        actual: format!("{} bytes", value.len()),
+                    });
                 }
-                CallArg::Result(index) => {
-                    // Store result index
-                    vector_data.extend_from_slice(&(*index as u64).to_le_bytes());
+            }
+            TypeTag::U64 => {
+                if value.len() != 8 {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: "u64 (8 bytes)".to_string(),
+                        actual: format!("{} bytes", value.len()),
+                    });
                 }
-                CallArg::NestedResult(outer, inner) => {
-                    // Store nested result indices
-                    vector_data.extend_from_slice(&(*outer as u64).to_le_bytes());
-                    vector_data.extend_from_slice(&(*inner as u64).to_le_bytes());
+            }
+            TypeTag::U128 => {
+                if value.len() != 16 {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: "u128 (16 bytes)".to_string(),
+                        actual: format!("{} bytes", value.len()),
+                    });
+                }
+            }
+            TypeTag::Address => {
+                if value.len() != 64 {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: "address (64 bytes)".to_string(),
+                        actual: format!("{} bytes", value.len()),
+                    });
+                }
+            }
+            _ => {
+                // For complex types, just check non-empty
+                if value.is_empty() {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: format!("{:?}", type_tag),
+                        actual: "empty value".to_string(),
+                    });
                 }
             }
         }
-        
-        ctx.add_result(CommandResult::Value(vector_data));
+        Ok(())
+    }
+
+    /// Validate that an object matches the expected type
+    fn validate_object_type(&self, type_tag: &TypeTag, object: &Object) -> Result<()> {
+        // Check if object type matches the expected type tag
+        match type_tag {
+            TypeTag::Struct { module, name, .. } => {
+                if object.object_type.module != *module || object.object_type.name != *name {
+                    return Err(ExecutionError::TypeMismatch {
+                        expected: format!("{}::{}", module, name),
+                        actual: format!("{}::{}", object.object_type.module, object.object_type.name),
+                    });
+                }
+            }
+            _ => {
+                return Err(ExecutionError::TypeMismatch {
+                    expected: "struct type".to_string(),
+                    actual: format!("{:?}", type_tag),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that a result value matches the expected type
+    fn validate_result_type(&self, _type_tag: &TypeTag, _result: &CommandResult) -> Result<()> {
+        // Type validation for results would require tracking result types
+        // For now, we just verify the result exists
         Ok(())
     }
 

@@ -243,18 +243,170 @@ impl WorkStealingExecutor {
     /// # Arguments
     /// * `node` - NUMA node ID
     fn set_numa_affinity(node: usize) {
-        // NUMA affinity is platform-specific
-        // On Linux: use numa_run_on_node() or sched_setaffinity()
-        // On Windows: use SetThreadAffinityMask()
-        // For now, this is a no-op placeholder
-        
-        debug!("Setting NUMA affinity to node {} (not implemented)", node);
-        
-        // TODO: Implement platform-specific NUMA binding
-        // This requires:
-        // - Linux: libnuma or direct syscalls
-        // - Windows: Windows API calls
-        // - macOS: No NUMA support (UMA architecture)
+        // Platform-specific NUMA affinity binding
+        #[cfg(target_os = "linux")]
+        {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+
+            // Use libnuma if available, otherwise use sched_setaffinity
+            #[cfg(feature = "libnuma")]
+            {
+                unsafe {
+                    // libnuma: numa_run_on_node(node)
+                    extern "C" {
+                        fn numa_run_on_node(node: i32) -> i32;
+                    }
+                    let result = numa_run_on_node(node as i32);
+                    if result == 0 {
+                        debug!("NUMA affinity set to node {}", node);
+                    } else {
+                        warn!("Failed to set NUMA affinity to node {}", node);
+                    }
+                }
+            }
+
+            #[cfg(not(feature = "libnuma"))]
+            {
+                // Fallback: use sched_setaffinity via syscall
+                use libc::{cpu_set_t, CPU_SET, sched_setaffinity, CPU_ZERO};
+
+                unsafe {
+                    let mut cpu_set: cpu_set_t = std::mem::zeroed();
+                    CPU_ZERO(&mut cpu_set);
+
+                    // Calculate CPU mask for the NUMA node
+                    // Assuming CPUs are distributed evenly across NUMA nodes
+                    let cpus_per_node = num_cpus::get() / Self::get_numa_node_count();
+                    let start_cpu = node * cpus_per_node;
+                    let end_cpu = (start_cpu + cpus_per_node).min(num_cpus::get());
+
+                    for cpu in start_cpu..end_cpu {
+                        CPU_SET(cpu, &mut cpu_set);
+                    }
+
+                    let result = sched_setaffinity(0, std::mem::size_of::<cpu_set_t>(), &cpu_set);
+                    if result == 0 {
+                        debug!(
+                            "NUMA affinity set to node {} (CPUs {}-{})",
+                            node, start_cpu, end_cpu
+                        );
+                    } else {
+                        warn!("Failed to set NUMA affinity to node {}", node);
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use winapi::um::processthreadsapi::SetThreadAffinityMask;
+            use winapi::um::winnt::HANDLE;
+            use std::ptr;
+
+            unsafe {
+                // Get current thread handle
+                let thread_handle = winapi::um::processthreadsapi::GetCurrentThread();
+
+                // Calculate CPU mask for the NUMA node
+                let cpus_per_node = num_cpus::get() / Self::get_numa_node_count();
+                let start_cpu = node * cpus_per_node;
+                let end_cpu = (start_cpu + cpus_per_node).min(num_cpus::get());
+
+                let mut affinity_mask: usize = 0;
+                for cpu in start_cpu..end_cpu {
+                    affinity_mask |= 1 << cpu;
+                }
+
+                let result = SetThreadAffinityMask(thread_handle, affinity_mask);
+                if result != 0 {
+                    debug!(
+                        "NUMA affinity set to node {} (CPUs {}-{})",
+                        node, start_cpu, end_cpu
+                    );
+                } else {
+                    warn!("Failed to set NUMA affinity to node {}", node);
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS uses UMA (Uniform Memory Architecture), not NUMA
+            // Thread affinity is not supported in the same way
+            debug!(
+                "NUMA affinity requested for node {}, but macOS uses UMA architecture",
+                node
+            );
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            debug!(
+                "NUMA affinity not supported on this platform (node {})",
+                node
+            );
+        }
+    }
+
+    /// Get the number of NUMA nodes
+    fn get_numa_node_count() -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            #[cfg(feature = "libnuma")]
+            {
+                unsafe {
+                    extern "C" {
+                        fn numa_num_configured_nodes() -> i32;
+                    }
+                    numa_num_configured_nodes() as usize
+                }
+            }
+
+            #[cfg(not(feature = "libnuma"))]
+            {
+                // Fallback: check /sys/devices/system/node/
+                std::fs::read_dir("/sys/devices/system/node/")
+                    .ok()
+                    .map(|entries| {
+                        entries
+                            .filter_map(|e| e.ok())
+                            .filter(|e| {
+                                e.file_name()
+                                    .to_string_lossy()
+                                    .starts_with("node")
+                            })
+                            .count()
+                    })
+                    .unwrap_or(1)
+            }
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            use winapi::um::winnt::ULONGLONG;
+            use winapi::um::sysinfoapi::GetNumaHighestNodeNumber;
+
+            unsafe {
+                let mut highest_node: u32 = 0;
+                if GetNumaHighestNodeNumber(&mut highest_node) != 0 {
+                    (highest_node + 1) as usize
+                } else {
+                    1
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS doesn't have NUMA
+            1
+        }
+
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+        {
+            1
+        }
     }
     
     /// Get the number of worker threads
