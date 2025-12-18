@@ -1,0 +1,39 @@
+[package]
+name = "silver-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Quantum VM execution engine with parallel transaction processing"
+
+[dependencies]
+# Core
+silver-core = { path = "../silver-core" }
+silver-crypto = { path = "../silver-crypto" }
+silver-storage = { path = "../silver-storage" }
+
+# Workspace dependencies
+tokio = { workspace = true }
+futures = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+rayon = { workspace = true }
+crossbeam = { workspace = true }
+blake3 = { workspace = true }
+num_cpus = "1.16"
+bcs = "0.1"
+libc = "0.2"
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
